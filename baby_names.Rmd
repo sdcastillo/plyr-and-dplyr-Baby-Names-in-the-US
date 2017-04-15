@@ -1,0 +1,205 @@
+---
+title: "dplyr, plyr, and tidyr: Baby Names in the US"
+author: "Sam Castillo"
+date: "April 15, 2017"
+output: html_document
+fontsize: 11pt
+---
+
+```{r global_options, warning = F, message = F}
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)
+library(googleVis)
+library(reshape2)
+```
+
+A dataset of baby names used by Hadley Wickham for a workshop can be found at https://github.com/hadley/babynames/tree/master/data.
+It contains the 1000 most popular male and female baby names in the US, from 1880 to 2008. There
+are 258,000 records (1000 * 2 * 129) but only four variables: year, name, sex, and percent. 
+
+The task is to identify the top 5 boys and girls names for each year from 1880 to 2008 and put it into a dataframe.
+
+```{r}
+bnames = read.csv('bnames.csv')
+str(bnames)
+#View(bnames)
+#bnames = as_data_frame(bnames)
+summary(bnames)
+```
+
+We can arrange by percent and by year with dplyr.
+
+```{r}
+
+tmp = bnames
+
+boys = tmp %>%
+  filter(sex == "boy")%>%
+  group_by(name, year) %>%
+  summarise(sum_percent = sum(percent))%>%
+  select(-year) %>%
+  arrange(desc(sum_percent))
+
+head(boys,10)
+
+tmp = bnames
+
+girls = tmp %>%
+  filter(sex == "girl")%>%
+  group_by(name, year) %>%
+  summarise(sum_percent = sum(percent))%>%
+  select(-year) %>%
+  arrange(desc(sum_percent))
+
+head(girls,10)
+```
+
+Finding the top 5 for each year and putting it in a wider format is more difficult.  The function `spread` from tidyr would not work easily in this case, at least not from what I can tell.  Here I split the dataframe into a list of dataframes and then apply a function over the entire list.  Finally, I put everything back together.
+
+```{r}
+boys_tmp = subset(bnames, sex =="boy")
+boys_tmp = split(boys_tmp, boys_tmp$year)
+
+girls_tmp = subset(bnames, sex =="girl")
+girls_tmp = split(girls_tmp, girls_tmp$year)
+
+```
+
+```{r, inculde = T, echo = T}
+top5 = function(dat){
+  cur_year = dat$year[1]
+  top_rows = top_n(dat,5, percent)
+  out = c(cur_year, as.character(top_rows$name))
+  # df = as_data_frame(matrix(ncol = 6, nrow = 1))
+  # df[1,] = out
+  return(out)
+}
+```
+
+Applying over the whole dataset.
+
+```{r}
+mynames = c("year", "1st.name" ,"2nd.name" , "3rd.name", "4th.name", "5th.name")
+
+girls_final = NULL
+girls_final = sapply(girls_tmp, top5)
+boys_final = ldply(boys_tmp, top5)
+
+df_girls_final = setNames(do.call(rbind.data.frame, girls_final), mynames)
+
+df_girls_final = df_girls_final[1:6] %>% as_data_frame()
+
+df_boys_final = boys_final %>%
+  select(-1) 
+
+names(df_boys_final) = mynames
+  
+df_final = rbind(df_girls_final, df_boys_final)
+
+head(df_final, 5)
+tail(df_final, 5)
+```
+
+We can try to identify the "trendiest" baby names by fitting linear regression models. We only use simple linear regression here.
+
+```{r}
+
+data <- bnames
+
+#creates a function of temp
+lm.fit <- function(temp){
+  #fits a simple linear regression model with year as the predictor and percent as the response
+  #over the columns percent and year of the data temp which was input
+  fit <- lm( percent ~ year, data = temp)
+  #returns the intercept and slope of the regression line, and n, the number of rows
+  return(data.frame(int=fit$coef[1],slope=fit$coef[2],
+                    
+  n=dim(temp)[1]))
+}
+#For each boys name and girls name, apply the lm.fit function to return a row for each name.
+#the columns are name, sex, intercept, slope, and n respectively.  See the output from the head 
+#function below
+inc.dec <- ddply(data,.(name,sex),lm.fit)
+
+#Examine only those names with greater than 100 observations
+inc.dec <- subset(inc.dec,n>100)
+
+#subset again to only the most extreme cases.  This looks only at the top 1% and botton 1% of the intercepts.
+#the na.rm options removes missing values.  
+inc.dec <- subset(inc.dec, (slope > quantile(slope, p=0.99,na.rm=T))|(slope < quantile(slope, p=0.01, na.rm=T)))
+head(inc.dec)
+dim(inc.dec)
+```
+
+The data.frame inc.dec above has 16 rows. For each of those names, I make a scatterplot with year on
+the x-axis and percent on the y-axis. Then I label the plot with the name, and use abline() to add the least
+squares regression line. 
+
+```{r eval = T, echo = T}
+outliers_df = filter(bnames, name %in% inc.dec$name)
+
+ggplot_function = function(cur_name) {
+  cur_dat = subset(outliers_df, name == cur_name)# %>%select(-sex, -name)
+  cur_dat = cur_dat[cur_dat$percent > 0.001,] #Remove rows with percent equal to zero
+  names(cur_dat) = c("year", "name", "percent", "sex")
+  lm.dat = subset(inc.dec, name == cur_name)
+  p1 = ggplot(data = cur_dat, aes(year,percent)) + geom_point(size = 0.2, colour = "red") + geom_abline(data = lm.dat, slope = lm.dat$slope, intercept = lm.dat$int) + theme_light() + ggtitle(paste(cur_name)) + xlim(1880, 2008) + ylim(0, 0.06)
+  
+  p1
+}
+```
+
+```{r }
+plots = lapply(inc.dec$name, ggplot_function)
+```
+
+
+```{r}
+do.call("grid.arrange", plots)
+```
+
+Have most babies had similar names in certain years?  In other words, how has the sum of percentage of the top 100 baby names changed over time?
+
+Here I create a plot that shows (by year and gender) the proportion of US children who have a name in the
+top 100. Proportion is on the y-axis, year on the x-axis, and two lines, one for each
+gender.
+
+```{r results = 'asis'}
+suppressPackageStartupMessages(library(googleVis))
+
+df_boys = bnames %>%
+  filter(sex =="boy") %>%
+  group_by(year) %>%
+  arrange(desc(percent)) %>%
+  filter(percent > min(head(percent, 101))) %>%
+  group_by(year)%>%
+  mutate(sum_percent = sum(percent)) 
+ 
+df_girls = bnames %>%
+  filter(sex =="girl") %>%
+  group_by(year) %>%
+  arrange(desc(percent)) %>%
+  filter(percent > min(head(percent, 101))) %>%
+  group_by(year)%>%
+  mutate(sum_percent = sum(percent)) 
+head(df_girls)
+
+p2 = ggplot(data = rbind(df_boys, df_girls), aes(year, sum_percent, sex))
+
+p2 + geom_point(aes(color = factor(sex))) + ggtitle("Sum of Top 100 Percentage of Baby Names by Year") + theme_linedraw()
+
+df3 = rbind(df_boys, df_girls)
+
+df3$year = as.Date(as.character(df3$year), "%Y")
+
+Anno = gvisAnnotationChart(df3, 
+                           datevar = "year",
+                           numvar = "sum_percent",
+                           idvar = "sex"
+                           )
+Anno
+```
+
